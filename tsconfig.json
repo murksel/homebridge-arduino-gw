@@ -19,7 +19,7 @@
   },
   "include": [
     "src/"
-  ],
+, "RoomTemperatureAccessory.ts"  ],
   "exclude": [
     "**/*.spec.ts"
   ]

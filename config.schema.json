@@ -1,15 +1,21 @@
 {
-  "pluginAlias": "ExampleHomebridgePlugin",
+  "pluginAlias": "ArduinoPlatform",
   "pluginType": "platform",
   "singular": true,
   "schema": {
     "type": "object",
     "properties": {
-      "name": {
-        "title": "Name",
+      "ip": {
+        "title": "IP",
         "type": "string",
         "required": true,
-        "default": "Example Dynamic Platform"
+        "default": "192.168.4.178"
+      },
+      "port": {
+        "title": "Port",
+        "type": "number",
+        "required": true,
+        "default": 80 
       }
     }
   }
