@@ -1,4 +1,4 @@
-import { ArduinoResult } from './arduinogateway';
+import { ArduinoResult } from "./arduinogateway";
 
 export interface TemperatureSensor {
   temperature: number;
@@ -18,22 +18,22 @@ export interface Heater {
 }
 
 export enum Raeume {
-  Arbeiten = 'Arbeiten',
-  Bad = 'Bad',
-  Diele = 'Diele',
-  Treppe = 'Treppe',
-  WGarten = 'WGarten',
-  Wohnen = 'Wohnen',
+  Arbeiten = "Arbeiten",
+  Bad = "Bad",
+  Diele = "Diele",
+  Treppe = "Treppe",
+  WGarten = "WGarten",
+  Wohnen = "Wohnen",
 }
 export enum Heaters {
-  Arbeiten = 'Arbeiten',
-  Bad = 'Bad',
-  Diele = 'Diele',
-  Treppe = 'Treppe',
-  Essen = 'Essen',
-  Kueche = 'Kueche',
-  WohnenL = 'WohnenL',
-  WohnenR = 'WohnenR',
+  Arbeiten = "Arbeiten",
+  Bad = "Bad",
+  Diele = "Diele",
+  Treppe = "Treppe",
+  Essen = "Essen",
+  Kueche = "Kueche",
+  WohnenL = "WohnenL",
+  WohnenR = "WohnenR",
 }
 
 export interface IHeatingSystem {
@@ -57,10 +57,13 @@ export interface IHeatingSystem {
 }
 
 export async function convertToHeatingSystem(
-  arduino: Promise<ArduinoResult>,
-): Promise<IHeatingSystem> {
+  arduino: Promise<ArduinoResult>
+): Promise<IHeatingSystem | undefined> {
   return arduino.then((a) => {
-    // console.log(a);
+    // console.log(`[convertToHeatingSystem] ${JSON.stringify(a)}`);
+    if (Object.keys(a).length === 0) {
+      return undefined;
+    }
     return {
       rooms: {
         ...Object.values(Raeume).reduce(
@@ -71,7 +74,7 @@ export async function convertToHeatingSystem(
               temperatureRaw: parseFloat(a[`tc${key}`]),
             } as TemperatureSensor,
           }),
-          {} as IHeatingSystem['rooms'],
+          {} as IHeatingSystem["rooms"]
         ),
       },
       heaters: {
@@ -86,18 +89,18 @@ export async function convertToHeatingSystem(
               targetLevel: parseFloat(a[`tgt${key}`]),
             } as Heater,
           }),
-          {} as IHeatingSystem['heaters'],
+          {} as IHeatingSystem["heaters"]
         ),
       },
       distributor: {
-        Pumpe: { state: !a['sswsPumpe'] },
+        Pumpe: { state: !a["sswsPumpe"] },
         Vorlauf: {
-          temperature: parseFloat(a['Vorlauf']),
-          temperatureRaw: parseFloat(a['tcVorlauf']),
+          temperature: parseFloat(a["Vorlauf"]),
+          temperatureRaw: parseFloat(a["tcVorlauf"]),
         },
         Ruecklauf: {
-          temperature: parseFloat(a['Ruecklauf']),
-          temperatureRaw: parseFloat(a['tcRuecklauf']),
+          temperature: parseFloat(a["Ruecklauf"]),
+          temperatureRaw: parseFloat(a["tcRuecklauf"]),
         },
         Mixer: {
           isMaintenance: !a[`mtnMixer`],
@@ -108,9 +111,9 @@ export async function convertToHeatingSystem(
         },
       },
       system: {
-        Version: a['version'],
-        Uptime: a['uptime'],
-        Threads: parseFloat(a['cntThreads']),
+        Version: a["version"],
+        Uptime: a["uptime"],
+        Threads: parseFloat(a["cntThreads"]),
       },
     };
   });

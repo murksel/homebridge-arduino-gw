@@ -1,3 +1,4 @@
+import { Mutex } from "async-mutex";
 import {
   API,
   APIEvent,
@@ -8,10 +9,12 @@ import {
   PlatformAccessory,
   PlatformAccessoryEvent,
   PlatformConfig,
+  UnknownContext,
 } from "homebridge";
 import { IPv4 } from "ip-num";
 import { ArduinoGateway } from "./arduinogateway";
 import { convertToHeatingSystem, IHeatingSystem } from "./heizung";
+import jp from "jsonpath";
 
 const PLUGIN_NAME = "ArduinoPlatform";
 const PLATFORM_NAME = "ArduinoPlatform";
@@ -43,9 +46,11 @@ let hap: HAP;
 let Accessory: typeof PlatformAccessory;
 
 let data: IHeatingSystem | undefined = undefined;
-const lastFetch: Date = new Date(0);
+let lastFetch = 0;
 let ip: string;
 let port: number;
+let mutex: Mutex;
+let dataCache: IHeatingSystem;
 
 export = (api: API) => {
   hap = api.hap;
@@ -66,6 +71,8 @@ class ArduinoPlatform implements DynamicPlatformPlugin {
     this.api = api;
     this.config = config;
 
+    mutex = new Mutex();
+
     ip = this.config.ip;
     port = this.config.port;
 
@@ -84,17 +91,26 @@ class ArduinoPlatform implements DynamicPlatformPlugin {
       if (!data) {
         data = await this.fetchData();
       }
+
+      // Add all sensors from room
       Object.keys(data.rooms).forEach((room) => {
-        const uuid = this.api.hap.uuid.generate(room);
-
-        const existingAccessory = this.accessories.find(
-          (accessory) => accessory.UUID === uuid
-        );
-
-        if (!existingAccessory) {
-          this.addAccessory(room);
-        }
+        this.addTemperaturSensorIfNotExist(room, "$.rooms." + room);
       });
+
+      Object.keys(data.heaters).forEach((heater) => {
+        this.addThermostatIfNotExist(`hk_${heater}`, "$.heaters." + heater);
+      });
+
+      // add vorlauf, ruecklauf
+      this.addTemperaturSensorIfNotExist("Vorlauf", "$.distributor.Vorlauf");
+      this.addTemperaturSensorIfNotExist(
+        "Ruecklauf",
+        "$.distributor.Ruecklauf"
+      );
+
+      this.addSwitchIfNotExist("Pumpe", "$.distributor.Pumpe");
+
+      this.addThermostatIfNotExist("Mixer", "$.distributor.Mixer");
     });
   }
 
@@ -109,23 +125,82 @@ class ArduinoPlatform implements DynamicPlatformPlugin {
       this.log("%s identified!", accessory.displayName);
     });
 
-    accessory
-      .getService(hap.Service.TemperatureSensor)!
-      .getCharacteristic(hap.Characteristic.CurrentTemperature)
-      .onGet(this.handleCurrentTemperatureGet(accessory.displayName));
+    accessory.services.forEach((service) => {
+      service.characteristics.forEach((characteristic) => {
+        if (characteristic instanceof hap.Characteristic.CurrentTemperature) {
+          characteristic.onGet(
+            this.handleCurrentTemperatureGet({
+              name: accessory.displayName,
+              context: accessory.context,
+            })
+          );
+        }
+
+        if (
+          characteristic instanceof
+          hap.Characteristic.CurrentHeatingCoolingState
+        ) {
+          characteristic.onGet(
+            this.handleCurrentHeatingCoolingStateGet({
+              name: accessory.displayName,
+              context: accessory.context,
+            })
+          );
+        }
+
+        if (characteristic instanceof hap.Characteristic.On) {
+          characteristic.onGet(
+            this.handleSwitchGet({
+              name: accessory.displayName,
+              context: accessory.context,
+            })
+          );
+          //            .onSet();
+        }
+      });
+    });
 
     this.accessories.push(accessory);
   }
 
   // --------------------------- CUSTOM METHODS ---------------------------
 
-  addAccessory(name: string) {
-    this.log.info("Adding new accessory with name %s", name);
+  addSwitchIfNotExist(name: string, path: string) {
+    this.log.info("Adding new switch with name %s", name);
 
     // uuid must be generated from a unique but not changing data source, name should not be used in the most cases.
     // But works in this specific example
     const uuid = hap.uuid.generate(name);
+    if (this.accessories.find((accessory) => accessory.UUID === uuid)) {
+      return;
+    }
+
     const accessory = new Accessory(name, uuid);
+
+    accessory.context.path = path;
+
+    accessory.addService(hap.Service.Switch, name);
+
+    this.configureAccessory(accessory); // abusing the configureAccessory here
+
+    this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
+      accessory,
+    ]);
+  }
+
+  addTemperaturSensorIfNotExist(name: string, path: string) {
+    this.log.info("Adding new temperatur sensor with name %s", name);
+
+    // uuid must be generated from a unique but not changing data source, name should not be used in the most cases.
+    // But works in this specific example
+    const uuid = hap.uuid.generate(name);
+    if (this.accessories.find((accessory) => accessory.UUID === uuid)) {
+      return;
+    }
+
+    const accessory = new Accessory(name, uuid);
+
+    accessory.context.path = path;
 
     accessory.addService(hap.Service.TemperatureSensor, name);
 
@@ -136,20 +211,125 @@ class ArduinoPlatform implements DynamicPlatformPlugin {
     ]);
   }
 
+  addThermostatIfNotExist(name: string, path: string) {
+    this.log.info("Adding new thermostat  with name %s", name);
+
+    // uuid must be generated from a unique but not changing data source, name should not be used in the most cases.
+    // But works in this specific example
+    const uuid = hap.uuid.generate(name);
+    if (this.accessories.find((accessory) => accessory.UUID === uuid)) {
+      return;
+    }
+
+    const accessory = new Accessory(name, uuid);
+
+    accessory.context.path = path;
+
+    accessory.addService(hap.Service.Thermostat, name);
+
+    this.configureAccessory(accessory); // abusing the configureAccessory here
+
+    this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [
+      accessory,
+    ]);
+  }
   // ----------------------------------------------------------------------
 
-  handleCurrentTemperatureGet(name: string): CharacteristicGetHandler {
+  handleCurrentTemperatureGet(ctx: {
+    name: string;
+    context?: UnknownContext;
+  }): CharacteristicGetHandler {
     return async () => {
-      return this.fetchData().then((d) => {
-        const _data = d.rooms[name].temperature;
-        return _data ? _data : data?.rooms[name].temperature;
-      });
+      return this.fetchData()
+        .then((d) => {
+          console.log(`[handleCurrentTemperatureGet] ${ctx.name}`);
+          const path = (
+            ctx.context?.path ? ctx.context.path : "$.rooms." + ctx.name
+          ) as string;
+          const sensor = jp.value(d, path);
+          if (path.startsWith("$.rooms.")) {
+            return sensor.temperature ? sensor.temperature : NaN;
+          } else if (path.startsWith("$.heaters.")) {
+            return sensor.level ? sensor.level : NaN;
+          } else if (path.startsWith("$.distributor.Vorlauf")) {
+            return sensor.temperature ? sensor.temperature : NaN;
+          } else if (path.startsWith("$.distributor.Ruecklauf")) {
+            return sensor.temperature ? sensor.temperature : NaN;
+          } else if (path.startsWith("$.distributor.Mixer")) {
+            return sensor.level ? sensor.level : NaN;
+          } else {
+            return NaN;
+          }
+        })
+        .catch(() => NaN);
+    };
+  }
+
+  handleCurrentHeatingCoolingStateGet(ctx: {
+    name: string;
+    context?: UnknownContext;
+  }): CharacteristicGetHandler {
+    return async () => {
+      return this.fetchData()
+        .then((d) => {
+          console.log(`[handleCurrentHeatingCoolingStateGet] ${ctx.name}`);
+          const sensor = jp.value(d, ctx.context?.path);
+
+          return sensor.levelReached === 1
+            ? hap.Characteristic.CurrentHeatingCoolingState.OFF
+            : hap.Characteristic.CurrentHeatingCoolingState.HEAT;
+        })
+        .catch(() => NaN);
+    };
+  }
+
+  handleSwitchGet(ctx: {
+    name: string;
+    context?: UnknownContext;
+  }): CharacteristicGetHandler {
+    return async () => {
+      return this.fetchData()
+        .then((d) => {
+          console.log(`[handleSwitchGet] ${ctx.name}`);
+          const path = ctx.context?.path ? ctx.context.path : "undefined";
+          const sensor = jp.value(d, path);
+          return sensor.stage ? sensor.state : NaN;
+        })
+        .catch(() => NaN);
     };
   }
 
   async fetchData(): Promise<IHeatingSystem> {
-    const client = new ArduinoGateway(new IPv4(ip), port);
-    this.log.info("Start fetching data");
-    return convertToHeatingSystem(client.getStatus());
+    const sleep = (milliseconds: number | undefined) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+    return mutex
+      .runExclusive(async () => {
+        if (Date.now() - lastFetch > 60000) {
+          const client = new ArduinoGateway(new IPv4(ip), port);
+          console.log(`${Date.now()} [fetchData] Start fetching data`);
+          const result = await convertToHeatingSystem(client.getStatus());
+          console.log(
+            `${Date.now()} [fetchData] result: ${JSON.stringify(
+              result?.system.Uptime
+            )}`
+          );
+          await sleep(200);
+          if (result) {
+            console.log(
+              `[fetchData] update cache ${JSON.stringify(result.system.Uptime)}`
+            );
+            dataCache = result;
+            lastFetch = Date.now();
+          }
+        } else {
+          console.log(
+            `[fetchData] use cache ${JSON.stringify(dataCache.system.Uptime)}`
+          );
+        }
+      })
+      .then(() => {
+        return dataCache;
+      });
   }
 }
